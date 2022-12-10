@@ -1,0 +1,163 @@
+# 0-1 Clear memory and load library
+```{r, message=FALSE}
+rm(list=ls())
+
+library(tidyverse)
+library(mfx)
+library(data.table)
+library(modelsummary)
+```
+
+# 0-2 Load data, filter city, and combine data
+As empty values of *stars* and *rating* seem to appear randomly, drop observations with insufficient information
+```{r}
+pri <- read.csv("https://osf.io/p6tyr/download")
+fea <- read.csv("https://osf.io/utwjs/download")
+
+fea <- fea %>% filter(!is.na(stars) & !is.na(rating))
+fea <- fea %>% filter(city == "Rome")
+
+comb <- left_join(fea, pri, by = "hotel_id")
+```
+\newpage
+
+# 0-3 Examine how high rating is related to the other hotel features in the data.
+```{r, warning=FALSE, out.width="80%"}
+drop_cols <- c('hotel_id', 'city', 'country', 'city_actual', 'central1label',
+               'central2label', 'neighbourhood','ratingta_count', 
+               'accomodation_type', 'offer', 'offer_cat', 'year', 'month',
+               'weekend', 'holiday', 'nnights', 'scarce_room')
+
+comb_nums <- keep( comb , is.numeric ) %>%  dplyr::select(-one_of(drop_cols))
+
+corr_table_comb <- round( cor( comb_nums , use = "complete.obs") , 2 )
+corr_table_comb[ upper.tri( corr_table_comb ) ] <- NA
+melted_cormat_comb <- melt( corr_table_comb , na.rm = TRUE)
+ggplot( data = melted_cormat_comb, aes( Var2 , Var1 , fill = value ) )+
+  geom_tile( color = "white" ) +
+  scale_fill_gradient2(low = "blue", high = "red", mid = "white", 
+                       midpoint = 0, limit = c(-1,1), space = "Lab", 
+                       name="Correlation") +
+  theme_bw()+ 
+  theme( axis.text.x = element_text(angle = 45, vjust = 1, 
+                                    size = 8, hjust = 1))+
+  labs(y="",x="")+
+  coord_fixed()
+```
+
+# 0-4 Create a descriptive statistic table for numeric variables
+```{r, warning=FALSE}
+p_5 <- function(x) {quantile(x, 0.05)}
+p_95 <- function(x) {quantile(x, 0.95)}
+range <- function(x) {max(x) - min(x)}
+
+datasummary(price + distance + stars + rating + rating_reviewcount +
+              distance_alter +  ratingta ~ 
+              N + Min + Max + Mean + Median + SD + range + p_5 + p_95,
+                      data = comb_nums, output = 'markdown')
+```
+
+# 0-5 Create a binary variable
+As request, set highly_rated = 1 if *rating* ≥ 4, 0 otherwise.
+```{r}
+comb <- comb %>% mutate(highly_rated = ifelse(rating >= 4, 1, 0))
+```
+\newpage
+
+# 1-1 Create LPM regression
+```{r}
+lpm_comb <- lm(highly_rated ~ distance + stars, data=comb)
+summary(lpm_comb, vcov=sandwich)
+```
+\newpage
+# 1-2 Prediction of LPM regression
+
+```{r, warning=FALSE}
+comb$pred_lpm <- predict(lpm_comb)
+
+comb_temp <- data.table(comb) #[!is.na(bmi) & !is.na(exerc) &  !is.na(eduyears)]
+
+pred_comb <- ggplot(data=comb_temp, aes(x=pred_lpm)) +
+  geom_histogram(aes(y = (..count..)/sum(..count..)),binwidth = NULL, bins=NULL,
+                 boundary=0, color = 'navyblue', fill = 'navyblue',
+                 alpha = 0.8,closed='left') +
+  coord_cartesian(xlim = c(0, 1.2)) +
+  labs(x = "Predicted probability of highly rated (LPM)",y = "Percent")+
+  scale_y_continuous(expand = c(0.00,0.0), limits = c(0,0.07), breaks = seq(0, 0.07, 0.01), labels = scales::percent_format(accuracy = 1)) +
+  scale_x_continuous(expand = c(0.001,0.01), limits = c(0,1.1), breaks = seq(0,1.1, 0.2)) +
+  theme_bw() 
+
+pred_comb
+```
+
+# 2-1 Logit model
+```{r}
+logit_comb <- glm(highly_rated ~ distance + stars, data = comb,
+                  family='binomial')
+summary(logit_comb)
+```
+
+# 2-2 Predicted probabilities of logit and logit marginal differences
+```{r}
+comb$pred_logit <- predict.glm(logit_comb, type="response")
+
+logit_comb_marg <- logitmfx(formula = highly_rated ~ distance + stars,
+                            data = comb, atmean=FALSE)
+print(logit_comb_marg)
+```
+
+# 3-1 Probit model
+```{r}
+probit_comb <- glm(highly_rated ~ distance + stars, data=comb,
+                   family=binomial(link="probit"))
+summary(probit_comb)
+```
+\newpage
+
+# 3-2 Rredicted probabilities of probit and probit marginal differences
+```{r}
+comb$pred_probit<- predict.glm(probit_comb, type="response") 
+
+probit_comb_marg <- probitmfx(formula = highly_rated ~ distance + stars,
+                              data=comb, atmean=FALSE)
+print(probit_comb_marg)
+```
+\newpage
+
+# 4-1 Compare models
+```{r, warning=FALSE}
+cm <- c('(Intercept)' = 'Constant')
+msummary(list("LPM" = lpm_comb, 
+              "Logit" = logit_comb, "Logit marg" =logit_comb_marg, 
+              "Probit" = probit_comb, 
+              "Probit marg" = probit_comb_marg),
+         fmt="%.3f",
+         gof_omit = 'DF|Deviance|Log.Lik.|F|R2 Adj.|AIC|BIC|R2|PseudoR2',
+         stars=c('*' = .05, '**' = .01),
+         coef_rename = cm, output = 'markdown'
+)
+```
+\newpage
+
+# 4-2 Predictions for LPM, logit, and probit
+```{r, warning=FALSE}
+pre <- ggplot(data = comb) +
+  geom_point(aes(x=pred_lpm, y=pred_probit, color="Probit"), size=0.8,
+             shape=16) +
+  geom_point(aes(x=pred_lpm, y=pred_logit, color="Logit"), size=0.8,
+             shape=16) +
+  geom_line(aes(x=pred_lpm, y=pred_lpm, color="45 degree line"), size=0.8) +
+  labs(x = "Predicted probability of staying healthy (LPM)",
+       y="Predicted probability")+
+  scale_y_continuous(expand = c(0.00,0.0), limits = c(0,1), 
+                     breaks = seq(0,1,0.1)) +
+  scale_x_continuous(expand = c(0.00,0.0), limits = c(0,1), 
+                     breaks = seq(0,1,0.1)) +
+  scale_color_manual(name = "",
+                     values=c("#541352FF", "#3a5e8cFF", "#10a53dFF")) +
+  theme_bw()+
+  theme(legend.position=c(0.55,0.08),
+        legend.direction = "horizontal",
+        legend.text = element_text(size = 8))
+pre
+```
