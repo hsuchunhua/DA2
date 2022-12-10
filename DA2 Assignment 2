@@ -124,7 +124,21 @@ print(probit_comb_marg)
 ```
 \newpage
 
-# 4-1 Compare models
+# 4-1 Compare models-without marginal models
+```{r, warning=FALSE}
+cm <- c('(Intercept)' = 'Constant')
+msummary(list("LPM" = lpm_comb, 
+              "Logit" = logit_comb, 
+              "Probit" = probit_comb),
+         fmt="%.3f",
+         gof_omit = 'DF|Deviance|Log.Lik.|F|R2 Adj.|AIC|BIC|R2|PseudoR2',
+         stars=c('*' = .05, '**' = .01),
+         coef_rename = cm, output = 'markdown'
+)
+```
+\newpage
+
+# 4-2 Compare models
 ```{r, warning=FALSE}
 cm <- c('(Intercept)' = 'Constant')
 msummary(list("LPM" = lpm_comb, 
@@ -139,7 +153,7 @@ msummary(list("LPM" = lpm_comb,
 ```
 \newpage
 
-# 4-2 Predictions for LPM, logit, and probit
+# 4-3 Predictions for LPM, logit, and probit
 ```{r, warning=FALSE}
 pre <- ggplot(data = comb) +
   geom_point(aes(x=pred_lpm, y=pred_probit, color="Probit"), size=0.8,
