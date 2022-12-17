@@ -1,0 +1,331 @@
+---
+title: "Energy consumption per capita and development level of a country"
+author: "Hsu Chun-Hua"
+geometry: margin=1.8cm
+output: 
+  pdf_document:
+    latex_engine: xelatex
+    extra_dependencies: ["flafter"]
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE, fig.pos = 'H') 
+```
+
+```{r library, echo=FALSE , warning=FALSE , message=FALSE}
+rm(list=ls())
+
+library(data.table)
+library(lspline)
+library(fixest)
+library(modelsummary)
+library(reshape2)
+library(tidyverse)
+library(ggpubr)
+library(kableExtra)
+library(gridExtra)
+```
+
+```{r Load data and clean data, echo=FALSE , warning=FALSE , message=FALSE}
+
+# loading
+energy <- read.csv("https://raw.githubusercontent.com/hsuchunhua/DA2/main/DA2%20Term%20Project/Data/energy.csv") 
+school <- read.csv("https://raw.githubusercontent.com/hsuchunhua/DA2/main/DA2%20Term%20Project/Data/expected-years-of-schooling.csv")
+life <- read.csv("https://raw.githubusercontent.com/hsuchunhua/DA2/main/DA2%20Term%20Project/Data/life-expectancy.csv") 
+fem_labor <- read.csv("https://raw.githubusercontent.com/hsuchunhua/DA2/main/DA2%20Term%20Project/Data/recent-ILO-LFP.csv") 
+fem_rate <- read.csv("https://raw.githubusercontent.com/hsuchunhua/DA2/main/DA2%20Term%20Project/Data/share-population-female.csv") 
+age_struc <- read.csv("https://raw.githubusercontent.com/hsuchunhua/DA2/main/DA2%20Term%20Project/Data/population-by-broad-age-group.csv")
+
+# Calculating age structure
+age_struc <- age_struc %>% mutate("elders" = 100*Population.by.broad.age.group...Sex..all...Age..65....Variant..estimates / 
+  (Population.by.broad.age.group...Sex..all...Age..65....Variant..estimates + Population.by.broad.age.group...Sex..all...Age..25.64...Variant..estimates + Population.by.broad.age.group...Sex..all...Age..15.24...Variant..estimates + Population.by.broad.age.group...Sex..all...Age..5.14...Variant..estimates + Population.by.broad.age.group...Sex..all...Age..0.4...Variant..estimates)) %>% select("Entity", "Code", "Year", "elders")
+
+# Renaming column names
+colnames(energy)[colnames(energy) ==  "Primary.energy.consumption.per.capita..kWh.person."] <- "energy_use" 
+colnames(school)[colnames(school) ==  "Expected.Years.of.Schooling"] <- "schooling" 
+colnames(life)[colnames(life) ==  "Life.expectancy.at.birth..historical."] <- "life"
+colnames(fem_labor)[colnames(fem_labor) ==  "Labor.force.participation.rate..female....of.female.population.ages.15....modeled.ILO.estimate."] <- "fem_lab" 
+colnames(fem_rate)[colnames(fem_rate) ==  "Population..female....of.total.population."] <- "fem_pop"
+
+# Combining all data into one data frame
+df <- energy %>% inner_join(school, by = c("Entity", "Code", "Year")) %>% 
+  inner_join(life, by = c("Entity", "Code", "Year")) %>% 
+  inner_join(fem_labor, by = c("Entity", "Code", "Year")) %>% 
+  inner_join(fem_rate, by = c("Entity", "Code", "Year")) %>% 
+  inner_join(age_struc, by = c("Entity", "Code", "Year")) %>% 
+  filter(Entity != "World") %>% filter(Year == 2019)
+```
+
+# Introduction
+\vspace{-3mm}
+Energy is one of the most important essentials in our life, and energy consumption per capita is different from country to country. Is it true that the higher the economic development level of a country, the higher the energy consumption per capita? I would like to examine if there is any correlation between energy usage and Human Development Index(HDI), excluding GDP. When it comes to level of development, I also take age structure and gender features into consideration.
+
+Human Development Index (HDI) is a statistical measure developed by the United Nations Development Programme (UNDP) to evaluate the progress of countries towards achieving human development. It is a composite measure that combines three dimensions of human development: a long and healthy life, access to knowledge, and A decent standard of living.
+
+\vspace{-3mm}
+# Data
+\vspace{-3mm}
+My data source is [Our World In Data](https://ourworldindata.org/), who collect and organize the data I used mainly from UNDP, UN WPP, and World Bank. I choose 2019 data that are most complete in latest years for this analysis. With total 216 observations, we have 178 observations without any missing value.
+
+```{r Descriptive statistics, echo=FALSE , warning=FALSE , message=FALSE}
+P05 <- function(x){quantile(x,0.05,na.rm=T)}
+P95 <- function(x){quantile(x,0.95,na.rm=T)}
+
+datasummary((`Energy Consumption per capita (kWh)` = energy_use) +
+              (`Expected Years of Schooling` = schooling) +
+              (`Life Expectancy` = life) +
+              (`Female Labor Participation Percentage (%)` = fem_lab) +
+              (`Female Population Percentage (%)` = fem_pop) +
+              (`Percentage of Population over the Age of 65 (%)` = elders) ~ 
+              N + Mean + Median + SD + Min + Max + P05 + P95, data = df,
+            fmt = 1,
+            title = 'Descriptive statistics') %>% 
+  kable_styling(latex_options = c("HOLD_position","scale_down"))
+```
+
+The standard deviations of *Energy Consumption per capita* and *Percentage of Population over the Age of 65* are relatively high, which mean these 2 values vary dramatically in different country.
+
+\- Both *Expected Years of Schooling* and *Life Expectancy* are parts of specification of Human Development Index calculation, but here we just simply take them as variables without sophisticated calculation.
+
+\- Typically, *Female Labor Participation Percentage* would be higher with higher development level of a country. Yet, it doesn't mean absolutely the higher the better. It can also lead to greater gender equality and help to reduce income inequality.
+
+\- *Female Population Percentage*: In general, there is no direct relationship between the size of a country's female population and its economic development. Thus, I would like to know if there is correlation between energy consumption and gender.
+
+\- *Percentage of Population over the Age of 65*: In some cases, an aging population may be associated with economic development, as it can be a sign of increased prosperity and improved standards of living. However, an aging population can also present challenges for a country's economy.
+
+Since *Energy Consumption per capita* has skewed distribution with long right tail, mean fairly bigger than median, we could transform regression by taking the natural logarithm on it, interpreting percentage difference in coefficients.
+
+\vspace{-3mm}
+## Oil-producing countries in the Middle East.
+\vspace{-3mm}
+```{r Female population, echo=FALSE, fig.align='center', out.width="60%"}
+df <- df %>% mutate(ln_energy = log(energy_use))
+
+ggplot(data = df, aes(x = fem_pop, y = ln_energy)) +
+        geom_smooth(fill = "lightgray", color = "brown") +
+        geom_point(shape = "circle", size = 1.5, colour = "#0C4C8A",alpha=0.5) +
+        labs(x = 'Female population percentage (%)',
+            y = 'ln(Energy Consumption per capita in kWh)',
+            title = 'Relationship between Energy consumption and Female percentage') +
+        geom_label(data =df %>% filter(fem_pop < 45 | fem_pop > 54),
+                    aes(label= Entity), nudge_y = 0.35, size = 3,
+                    label.padding = unit(0.1, "lines"),
+                    color = "black", fill="#69b3a2", check_overlap = T ) +
+        theme_bw()
+```
+
+In most countries, the Female population percentage is around 50%, and there is no obvious correlation between the Female population percentage and energy consumption per capita. However, the Female population percentage is lower in some oil-producing countries in the Middle East, possibly due to religions, and energy consumption per capita in those countries is also higher.
+
+Typically, oil-producing countries in the Middle East are classified as developed countries which are higher per capita gross domestic product (GDP), higher levels of economic development, higher levels of education, and higher standards of living. However, because oil-producing countries in the Middle East also tend to have higher levels of income inequality, some people may not consider these countries to be developed.
+
+\vspace{-3mm}
+## Percentage of Population over the Age of 65
+\vspace{-3mm}
+```{r Elders, echo=FALSE, fig.align='center', out.width="60%"}
+ggplot(data = df, aes(x = elders, y = ln_energy)) +
+        geom_smooth(fill = "lightgray", color = "brown") +
+        geom_point(shape = "circle", size = 1.5, colour = "#0C4C8A",alpha=0.5) +
+        labs(x = 'Percentage of Population over the Age of 65 (%)',
+            y = 'ln(Energy Consumption per capita in kWh)',
+            title = 'Relationship between Energy consumption and Percentage of elder people') +
+        geom_label(data =df %>% filter(elders > 25),
+                    aes(label= Entity), nudge_y = 0.3, size = 3,
+                    label.padding = unit(0.1, "lines"),
+                    color = "black", fill="#69b3a2", check_overlap = T ) +
+        theme_bw()
+```
+
+There is some evidence to suggest that there may be a relationship between population aging and a country's level of development. As a country becomes more developed, it tends to experience a decline in fertility rates and an increase in life expectancy, which can lead to an aging population. In turn, the aging of a country's population can have various impacts on its economic and social development.
+
+\vspace{-3mm}
+# Models
+\vspace{-3mm}
+The purpose of this regression analysis is to identify the association between energy consumption per capita and the level of development of a country, also taking into account factors such as gender equality and age structure in each country.
+
+```{r Regressions and Models, echo = F,  warning = F, message = F}
+# Unconditional
+reg1 <- feols(ln_energy ~ schooling + life + fem_lab, data=df, vcov = 'hetero')
+
+
+# Simple association
+reg2 <- feols(ln_energy ~ schooling + life + fem_lab + fem_pop,
+              data = df, vcov = 'hetero')
+
+reg3 <- feols(ln_energy ~ schooling + life + fem_lab + elders,
+              data = df, vcov = 'hetero')
+
+reg4 <- feols(ln_energy ~ schooling + life + fem_lab + fem_pop + elders, 
+              data = df, vcov = 'hetero')
+
+
+# Using complicated pattern
+reg5 <- feols(ln_energy ~ schooling + life + fem_lab +
+                lspline(fem_pop, 50) + lspline(elders, c(7,14)),
+              data = df, vcov = 'hetero')
+
+
+
+# Regression table
+# Rename variables to human readable
+varname_report <- c("(Intercept)" = "Intercept",
+                    "schooling" = "Expected Years of Schooling",
+                    "life" = "Life Expectancy",
+                    "fem_lab" = "Female Labor Participation Percentage",
+                    "fem_pop" = "Female Population Percentage",
+                    "elders" = "Percentage of Population over the Age of 65",
+                    "lspline(fem_pop, 50)1" = 
+                      "Lower Female Population Percentage",
+                    "lspline(fem_pop, 50)2" = 
+                      "Higher Female Population Percentage",
+                    "lspline(elders, c(7, 14))1" = "Not aging society (<7%)",
+                    "lspline(elders, c(7, 14))2" = "Aging society (7%-14%)",
+                    "lspline(elders, c(7, 14))3" = "Age-friendly society (> 14%)")
+
+
+msummary(list("(1)" = reg1, "(2)" = reg2, "(3)" = reg3, "(4)" =  reg4, "(5)" =  reg5),
+         fmt="%.2f",
+         gof_omit = 'DF|Deviance|Log.Lik.|F|AIC|BIC|R2 Within|R2 Pseudo|Std.Errors',
+         stars=TRUE,
+         estimate = "{estimate}{stars} ", 
+         statistic = "std.error",
+         coef_rename = varname_report,
+         title = "Models with log Energy Consumption per capita",
+         output = 'markdown') %>% 
+        kable_classic(full_width = F, position = "center", font_size = 9)
+```
+
+We can find results from models in *Table 2*.
+
+According to **Model 1**, we can see that the level of human development in a country is positively correlated with energy consumption per capita, with statistically significant at 1%. As energy consumption per capita has been taken in natural logarithms, from the coefficients we can see that: expected years of schooling increase by 1 year, energy consumption per capita increases by 17%; at the same time, expected life expectancy increases by 1 year, energy consumption per capita increases by 11%. Interestingly, Female Labor Participation Percentage, one of the symbols of gender equality, shows a negative correlation: for every 1% increase in the female employment population, energy consumption per capita increases by 1%.
+
+In **Model 2** and **Model 3**, I respectively add Female Labor Participation Percentage and Percentage of Population over the Age of 65 as new explanatory variables. The correlation between level of human development, expected years of schooling and life expectancy, and energy consumption per capita did not change, only the coefficient adjusted by 2%-3%. In **Model 2**, it can also be found that the Female Population Percentage is negatively correlated with energy consumption per capita: for every 1% increase in the female population, energy consumption per capita decreases by 8%. However, in **Model 3** the elderly population percentage does not have correlation with energy consumption per capita.
+
+\newpage
+**Model 4** is a combination of Model 2 and Model 3, and the result is also similar to them. Regarding both Female Population Percentage and Percentage of Population over the Age of 65, we still can not find association with latter. Finally, with most detailed **Model 5**, I respectively divide Female Population into 2 intervals and Degree of Age Structure into 3 intervals. Index of level of human development are still correlation with energy consumption per capita but coefficient of Life Expectancy cut in half. However, female population that has correlation in previous models has correlation only in lower female population interval here. We can also find for countries who has elder population lower than 7% increase 22% energy consumption per capita with additional 1% elder population.
+
+\vspace{-3mm}
+# Generalization and external validity
+\vspace{-3mm}
+We have found the relationship between energy consumption per capita and HDI factors in 2019. Thus, we would like to know if we can similar patterns in other years by making robustness checks.
+
+```{r External validity, echo = F,  warning = F, message = F}
+# Combining all data into one data frame for other years
+df2 <- energy %>% inner_join(school, by = c("Entity", "Code", "Year")) %>% 
+  inner_join(life, by = c("Entity", "Code", "Year")) %>% 
+  inner_join(fem_labor, by = c("Entity", "Code", "Year")) %>% 
+  inner_join(fem_rate, by = c("Entity", "Code", "Year")) %>% 
+  inner_join(age_struc, by = c("Entity", "Code", "Year")) %>% 
+  filter(Entity != "World") %>% filter(Year == 2018) %>% 
+  mutate(ln_energy = log(energy_use))
+
+
+df3 <- energy %>% inner_join(school, by = c("Entity", "Code", "Year")) %>% 
+  inner_join(life, by = c("Entity", "Code", "Year")) %>% 
+  inner_join(fem_labor, by = c("Entity", "Code", "Year")) %>% 
+  inner_join(fem_rate, by = c("Entity", "Code", "Year")) %>% 
+  inner_join(age_struc, by = c("Entity", "Code", "Year")) %>% 
+  filter(Entity != "World") %>% filter(Year == 2015) %>% 
+  mutate(ln_energy = log(energy_use))
+
+
+reg6 <- feols(ln_energy ~ schooling + life + fem_lab + fem_pop + elders, 
+              data = df2, vcov = 'hetero')
+
+reg7 <- feols(ln_energy ~ schooling + life + fem_lab + fem_pop + elders, 
+              data = df3, vcov = 'hetero')
+
+
+msummary(list("(4)" = reg4, "(6)" = reg6, "(7)" = reg7),
+         fmt="%.2f",
+         gof_omit = 'DF|Deviance|Log.Lik.|F|AIC|BIC|R2 Within|R2 Pseudo|Std.Errors',
+         stars=TRUE,
+         estimate = "{estimate}{stars} ", 
+         statistic = "std.error",
+         coef_rename = varname_report,
+         title = "Models with log Energy Consumption per capita",
+         output = 'markdown') %>% 
+        kable_classic(full_width = F, position = "center", font_size = 9)
+```
+
+Adding 2018, **Model 6**, and 2015, **Model 7** data in regression to examine if they have similar patterns as 2019 in **Model 4**, we could say the answer is yes.
+
+\vspace{-3mm}
+## Causal interpretation and Conclusion
+\vspace{-3mm}
+A multiple regression on observational data is rarely capable of uncovering a causal relationship, but it can get us closer to uncovering a causal relationship. For example, setting *Lower Female Population Percentage* or *Not aging society (elder \< 7%)* as conditional variable to compare two countries.
+
+In conclusion, We can find from the above that the energy consumption per capita is positively correlated with HDI factors, expected years of education and life expectancy. From the Figure and model in appendix, when the expected years of schooling reach a certain number, the coefficient of energy consumption per capita becomes very small, which is in line with my expectations.
+
+Only countries with highest expected years of schooling are associated with energy efficiency and conservation. In other words, most countries increase energy consumption per capita with economic development. Maybe we should enhance the idea of saving energy, or generating more energy, worldwide, and take actual actions.
+
+\newpage
+
+# Appendix
+
+## Relationships between Energy consumption and HDI factors
+
+```{r Graphs of HDI factors, echo=FALSE, fig.align='center'}
+gr1 <- ggplot(data = df, aes(x = schooling, y = ln_energy)) +
+          geom_smooth(fill = "lightgray", color = "brown") +
+          geom_point(shape = "circle", size = 1.5, colour = "#0C4C8A",
+                     alpha=0.5) +
+          labs(x = 'Expected Years of Schooling',
+              y = 'ln(Energy Consumption per capita in kWh)',
+              title = 'Expected Years of Schooling',
+              title.align = "center") +
+          theme_bw(base_size = 10,)
+
+
+gr2 <- ggplot(data = df, aes(x = life, y = ln_energy)) +
+          geom_smooth(fill = "lightgray", color = "brown") +
+          geom_point(shape = "circle", size = 1.5, colour = "#0C4C8A",
+                     alpha=0.5) +
+          labs(x = 'Life Expectancy',
+              y = 'ln(Energy Consumption per capita in kWh)',
+              title = 'Life Expectancy',
+              title.align = "center") +
+          theme_bw(base_size = 10)
+
+
+grid.arrange(grobs = list(gr1, gr2), ncol=2, top = "Fig.A: Relationships between Energy consumption and")
+
+```
+
+\newpage
+## Model using spline on both Expected Years of Schooling and Life Expectancy
+
+```{r Spline on HDI factors, echo = F,  warning = F, message = F}
+regz <- feols(ln_energy ~ lspline(schooling, c(10.7, 13.6, 16.5)) + 
+                                    lspline(life, c(64.9, 72.5, 80.1)),
+              data = df, vcov = 'hetero')
+
+varname_report1 <- c("(Intercept)" = "Intercept",
+                    "lspline(schooling, c(10.7, 13.6, 16.5))1" = 
+                      "Expected Years of Schooling < 10.7",
+                    "lspline(schooling, c(10.7, 13.6, 16.5))2" = 
+                      "Expected Years of Schooling between 10.7 and 13.6",
+                    "lspline(schooling, c(10.7, 13.6, 16.5))3" = 
+                      "Expected Years of Schooling between 13.6 and 16.5",
+                    "lspline(schooling, c(10.7, 13.6, 16.5))4" = 
+                      "Expected Years of Schooling > 16.6",
+                    "lspline(life, c(64.9, 72.5, 80.1))1" = 
+                      "Life Expectancy < 64.9",
+                    "lspline(life, c(64.9, 72.5, 80.1))2" = 
+                      "Life Expectancy between 64.9 and 72.5",
+                    "lspline(life, c(64.9, 72.5, 80.1))3" = 
+                      "Life Expectancy between 72.5 and 80.1",
+                    "lspline(life, c(64.9, 72.5, 80.1))4" = 
+                      "Life Expectancy > 80.1")
+
+msummary(list("(Z)" = regz),
+         fmt="%.2f",
+         gof_omit = 'DF|Deviance|Log.Lik.|F|AIC|BIC|R2 Within|R2 Pseudo|Std.Errors',
+         stars=TRUE,
+         estimate = "{estimate}{stars} ", 
+         statistic = "std.error",
+         coef_rename = varname_report1,
+         title = "Model with log Energy Consumption per capita",
+         output = 'markdown') %>% 
+        kable_classic(full_width = F, position = "center", font_size = 9)
+
+```
